@@ -171,6 +171,7 @@ export default async function handler(req, res) {
         (sourceType === "group" || sourceType === "room") &&
         !isBotMentioned(event)
       ) {
+        console.log("MENTION_NOT_DETECTED", JSON.stringify(event.message));
         continue;
       }
 
