@@ -24,7 +24,6 @@ function verifySignature(rawBody, signature) {
 
   const a = Buffer.from(expected);
   const b = Buffer.from(signature);
-
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
@@ -59,7 +58,7 @@ async function askGemini(question) {
   if (!apiKey) throw new Error("GEMINI_API_KEYが設定されていません");
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
     {
       method: "POST",
       headers: {
@@ -74,10 +73,13 @@ async function askGemini(question) {
           },
         ],
         generationConfig: {
-          maxOutputTokens: 4096,
+          maxOutputTokens: 1024,
+          thinkingConfig: {
+            thinkingLevel: "minimal",
+          },
         },
       }),
-      signal: AbortSignal.timeout(22000),
+      signal: AbortSignal.timeout(25000),
     }
   );
 
