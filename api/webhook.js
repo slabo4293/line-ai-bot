@@ -59,7 +59,7 @@ async function askGemini(question) {
   if (!apiKey) throw new Error("GEMINI_API_KEYが設定されていません");
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
     {
       method: "POST",
       headers: {
@@ -74,7 +74,7 @@ async function askGemini(question) {
           },
         ],
         generationConfig: {
-          maxOutputTokens: 1500,
+          maxOutputTokens: 4096,
         },
       }),
       signal: AbortSignal.timeout(22000),
