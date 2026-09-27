@@ -106,7 +106,7 @@ function supabaseBaseUrl() {
 }
 
 async function dbRequest(path, options = {}) {
-  const key = process.env.SUPABASE_SECRET_KEY;
+  const key = process.env.SUPABASE_HISTORY_KEY;
 
   if (!key) {
     throw new Error(
