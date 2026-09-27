@@ -15,7 +15,9 @@ function readRawBody(req) {
 
 function verifySignature(raw, signature) {
   const secret = process.env.LINE_CHANNEL_SECRET;
-  if (!secret || !signature) return false;
+  if (!secret || typeof signature !== "string") {
+    return false;
+  }
 
   const expected = crypto
     .createHmac("sha256", secret)
@@ -34,13 +36,14 @@ function verifySignature(raw, signature) {
 
 function conversationId(event) {
   const source = event.source;
-  if (source?.type === "group") {
+
+  if (source?.type === "group" && source.groupId) {
     return `group:${source.groupId}`;
   }
-  if (source?.type === "room") {
+  if (source?.type === "room" && source.roomId) {
     return `room:${source.roomId}`;
   }
-  if (source?.type === "user") {
+  if (source?.type === "user" && source.userId) {
     return `user:${source.userId}`;
   }
   return null;
@@ -51,35 +54,64 @@ function getQuestion(event) {
   if (typeof text !== "string") return null;
 
   const type = event.source?.type;
+
+  // 1対1のトークではメンション不要
   if (type !== "group" && type !== "room") {
     return text.trim();
   }
 
   const mentions =
     event.message?.mention?.mentionees ?? [];
+
   const botMentions = mentions
     .filter(m => m.isSelf === true)
     .sort((a, b) => b.index - a.index);
 
-  if (!botMentions.length) return null;
+  // グループではBotへのメンションが必要
+  if (botMentions.length === 0) return null;
 
   let question = text;
+
   for (const m of botMentions) {
-    if (Number.isInteger(m.index) &&
-        Number.isInteger(m.length)) {
+    if (
+      Number.isInteger(m.index) &&
+      Number.isInteger(m.length) &&
+      m.index >= 0 &&
+      m.length >= 0
+    ) {
       question =
         question.slice(0, m.index) +
         question.slice(m.index + m.length);
     }
   }
+
   return question.trim();
 }
 
+function supabaseBaseUrl() {
+  const value = process.env.SUPABASE_URL?.trim();
+
+  if (!value) {
+    throw new Error("SUPABASE_URLが未設定です");
+  }
+
+  const url = new URL(value);
+
+  // 環境変数がプロジェクトURLでもData API URLでも対応
+  url.pathname = "/rest/v1/";
+  url.search = "";
+  url.hash = "";
+
+  return url.toString();
+}
+
 async function dbRequest(path, options = {}) {
-  const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY;
-  if (!url || !key) {
-    throw new Error("Supabaseの設定がありません");
+
+  if (!key) {
+    throw new Error(
+      "SUPABASE_SECRET_KEYが未設定です"
+    );
   }
 
   const headers = {
@@ -92,7 +124,7 @@ async function dbRequest(path, options = {}) {
   };
 
   const response = await fetch(
-    `${url.replace(/\/+$/, "")}/rest/v1/${path}`,
+    new URL(path, supabaseBaseUrl()),
     {
       ...options,
       headers,
@@ -105,6 +137,7 @@ async function dbRequest(path, options = {}) {
       `Supabase ${response.status}: ${await response.text()}`
     );
   }
+
   return response;
 }
 
@@ -115,10 +148,12 @@ async function getHistory(id) {
     order: "created_at.desc",
     limit: "20",
   });
+
   const response = await dbRequest(
-    `line_messages?${params}`,
+    `line_messages?${params.toString()}`,
     { method: "GET" }
   );
+
   const rows = await response.json();
   return Array.isArray(rows) ? rows.reverse() : [];
 }
@@ -136,6 +171,7 @@ async function saveMessage(id, role, content) {
 }
 async function askGemini(question, history) {
   const key = process.env.GEMINI_API_KEY;
+
   if (!key) {
     throw new Error("GEMINI_API_KEYが未設定です");
   }
@@ -160,7 +196,7 @@ async function askGemini(question, history) {
   });
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
     {
       method: "POST",
       headers: {
@@ -173,7 +209,7 @@ async function askGemini(question, history) {
           temperature: 0.7,
           maxOutputTokens: 4096,
           thinkingConfig: {
-            thinkingBudget: 512,
+            thinkingLevel: "low",
           },
         },
       }),
@@ -182,6 +218,7 @@ async function askGemini(question, history) {
   );
 
   const data = await response.json();
+
   if (!response.ok) {
     throw new Error(
       `Gemini ${response.status}: ${JSON.stringify(data)}`
@@ -211,6 +248,7 @@ async function askGemini(question, history) {
 async function replyToLine(replyToken, text) {
   const token =
     process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
   if (!token || !replyToken) {
     throw new Error("LINEの返信設定がありません");
   }
@@ -279,23 +317,15 @@ async function handleEvent(event) {
     return;
   }
 
-  // LINEへの返信を履歴保存より先に行う
+  // 返信を履歴保存より先に行う
   await replyToLine(
     event.replyToken,
     answer
   );
 
   try {
-    await saveMessage(
-      id,
-      "user",
-      question
-    );
-    await saveMessage(
-      id,
-      "assistant",
-      answer
-    );
+    await saveMessage(id, "user", question);
+    await saveMessage(id, "assistant", answer);
   } catch (error) {
     console.error("履歴保存エラー:", error);
   }
@@ -310,10 +340,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    res.setHeader(
-      "Allow",
-      ["GET", "POST"]
-    );
+    res.setHeader("Allow", ["GET", "POST"]);
     return res.status(405).json({
       error: "Method Not Allowed",
     });
@@ -333,9 +360,7 @@ export default async function handler(req, res) {
     let body;
 
     try {
-      body = JSON.parse(
-        raw.toString("utf8")
-      );
+      body = JSON.parse(raw.toString("utf8"));
     } catch {
       return res.status(400).json({
         error: "Invalid JSON",
@@ -361,11 +386,7 @@ export default async function handler(req, res) {
       ok: true,
     });
   } catch (error) {
-    console.error(
-      "Webhookエラー:",
-      error
-    );
-
+    console.error("Webhookエラー:", error);
     return res.status(500).json({
       error: "Internal Server Error",
     });
