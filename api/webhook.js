@@ -22,155 +22,120 @@ function verifySignature(rawBody, signature) {
     .update(rawBody)
     .digest("base64");
 
-  const a = Buffer.from(expected);
-  const b = Buffer.from(signature);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  try {
+    const a = Buffer.from(expected);
+    const b = Buffer.from(signature);
+
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+// ----------------------------
+// LINE情報
+// ----------------------------
+
+function getConversationId(event) {
+  if (event.source?.type === "group") {
+    return `group:${event.source.groupId}`;
+  }
+
+  if (event.source?.type === "room") {
+    return `room:${event.source.roomId}`;
+  }
+
+  if (event.source?.type === "user") {
+    return `user:${event.source.userId}`;
+  }
+
+  return null;
+}
+
+function isGroupOrRoom(event) {
+  return (
+    event.source?.type === "group" ||
+    event.source?.type === "room"
+  );
+}
+
+function isBotMentioned(event) {
+  const mentions =
+    event.message?.mention?.mentionees ?? [];
+
+  return mentions.some(
+    (item) => item.isSelf === true
+  );
 }
 
 function getQuestion(event) {
   const text = event.message?.text ?? "";
-  const sourceType = event.source?.type;
-  const isGroup = sourceType === "group" || sourceType === "room";
 
-  if (!isGroup) return text.trim();
+  // 1対1ではメンション不要
+  if (!isGroupOrRoom(event)) {
+    return text.trim();
+  }
 
-  const mentions = event.message?.mention?.mentionees ?? [];
-  const botMentions = mentions.filter((item) => item.isSelf === true);
-  if (botMentions.length === 0) return null;
+  const mentions =
+    event.message?.mention?.mentionees ?? [];
+
+  const botMentions = mentions.filter(
+    (item) => item.isSelf === true
+  );
+
+  // グループではメンションされていなければ返信しない
+  if (botMentions.length === 0) {
+    return null;
+  }
 
   let question = text;
-  for (const mention of botMentions.sort((a, b) => b.index - a.index)) {
+
+  // @AI部分だけ取り除く
+  for (
+    const mention of [...botMentions].sort(
+      (a, b) => b.index - a.index
+    )
+  ) {
     if (
       typeof mention.index === "number" &&
       typeof mention.length === "number"
     ) {
       question =
         question.slice(0, mention.index) +
-        question.slice(mention.index + mention.length);
+        question.slice(
+          mention.index + mention.length
+        );
     }
   }
 
   return question.trim();
 }
 
-async function askGemini(question) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEYが設定されていません");
+// ----------------------------
+// Supabase
+// ----------------------------
 
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: question }],
-          },
-        ],
-        generationConfig: {
-          maxOutputTokens: 1024,
-          thinkingConfig: {
-            thinkingLevel: "minimal",
-          },
-        },
-      }),
-      signal: AbortSignal.timeout(25000),
-    }
-  );
+function getSupabaseConfig() {
+  const url = process.env.SUPABASE_URL;
 
-  if (!response.ok) {
-    const details = await response.text();
-    console.error("Gemini error:", response.status, details);
-    throw new Error(`Gemini HTTP ${response.status}`);
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    throw new Error(
+      "Supabase環境変数が設定されていません"
+    );
   }
 
-  const data = await response.json();
-  const answer = (data.candidates?.[0]?.content?.parts ?? [])
-    .map((part) => part.text ?? "")
-    .join("")
-    .trim();
-
-  if (!answer) throw new Error("Geminiから文章が返りませんでした");
-  return answer;
+  return { url, key };
 }
 
-async function replyLINE(replyToken, message) {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  if (!token) throw new Error("LINE_CHANNEL_ACCESS_TOKENが設定されていません");
+async function saveMessage(event) {
+  const conversationId =
+    getConversationId(event);
 
-  const response = await fetch(
-    "https://api.line.me/v2/bot/message/reply",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        replyToken,
-        messages: [
-          {
-            type: "text",
-            text: String(message).slice(0, 5000),
-          },
-        ],
-      }),
-    }
-  );
+  if (!conversationId) return;
 
-  if (!response.ok) {
-    console.error("LINE reply error:", response.status, await response.text());
-  }
-}
+  const text = event.message?.text?.trim();
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(200).send("LINE AI Bot is running");
-  }
-
-  try {
-    const rawBody = await readRawBody(req);
-    if (!verifySignature(rawBody, req.headers["x-line-signature"])) {
-      return res.status(401).send("Invalid signature");
-    }
-
-    const body = JSON.parse(rawBody.toString("utf8"));
-
-    for (const event of body.events ?? []) {
-      if (
-        event.type !== "message" ||
-        event.message?.type !== "text" ||
-        !event.replyToken
-      ) {
-        continue;
-      }
-
-      const question = getQuestion(event);
-      if (question === null) continue;
-
-      let answer;
-      if (!question) {
-        answer = "メンションの後に質問を入力してください。";
-      } else {
-        try {
-          answer = await askGemini(question);
-        } catch (error) {
-          console.error("AI接続エラー:", error);
-          answer = `AI接続エラー: ${error.message}`;
-        }
-      }
-
-      await replyLINE(event.replyToken, answer);
-    }
-
-    return res.status(200).send("OK");
-  } catch (error) {
-    console.error("Webhook error:", error);
-    return res.status(500).send("Internal Server Error");
-  }
-}
+  if (!text)
